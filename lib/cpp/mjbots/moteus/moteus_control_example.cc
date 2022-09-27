@@ -172,8 +172,7 @@ class SampleController {
   /// @p output should hold the desired output.  It will be
   /// pre-populated with the result of the last command cycle, (or
   /// Initialize to begin with).
-  void Run(const std::vector<MoteusInterface::ServoReply>& status,
-           std::vector<MoteusInterface::ServoCommand>* output) {
+  void Run(const std::vector<MoteusInterface::ServoReply>& status, std::vector<MoteusInterface::ServoCommand>* output) {
     cycle_count_++;
 
     // This is where your control loop would go.
@@ -183,26 +182,25 @@ class SampleController {
         // We start everything with a stopped command to clear faults.
         cmd.mode = moteus::Mode::kStopped;
       }
-    } else {
-      // Then we make the secondary servo mirror the primary servo.
+    } else if  (cycle_count_ < 10) {
+      // Then we control primary servo
       const auto primary = Get(status, arguments_.primary_id, arguments_.primary_bus);
+      std::cout << status << std::endl;
+      std::cout << arguments_.primary_id << std::endl;
+      std::cout << arguments_.primary_bus << std::endl;
+      
       double primary_pos = primary.position;
       if (!std::isnan(primary_pos) && std::isnan(primary_initial_)) {
         primary_initial_ = primary_pos;
       }
-      double secondary_pos = Get(status, arguments_.secondary_id, arguments_.secondary_bus).position;
-      if (!std::isnan(secondary_pos) && std::isnan(secondary_initial_)) {
-        secondary_initial_ = secondary_pos;
-      }
-      if (!std::isnan(primary_initial_) && !std::isnan(secondary_initial_)) {
-        // We have everything we need to start commanding.
-        auto& secondary_out = output->at(1);  // We constructed this, so we know the order.
-        secondary_out.mode = moteus::Mode::kPosition;
-        secondary_out.position.position = secondary_initial_ + (primary_pos - primary_initial_);
-        secondary_out.position.velocity = primary.velocity;
-      }
+    } else {
+
     }
   }
+
+
+
+
 
  private:
   const Arguments arguments_;
@@ -210,6 +208,10 @@ class SampleController {
   double primary_initial_ = std::numeric_limits<double>::quiet_NaN();
   double secondary_initial_ = std::numeric_limits<double>::quiet_NaN();
 };
+
+
+
+// -------------------- Runing the main cycle of the program --------------------
 
 template <typename Controller>
 void Run(const Arguments& args, Controller* controller) {
@@ -305,7 +307,7 @@ void Run(const Arguments& args, Controller* controller) {
     }
     next_cycle += period;
 
-
+    // ------------------------------------- HERE, we are calling the controller -------------------------------------
     controller->Run(saved_replies, &commands);
 
 
@@ -334,6 +336,11 @@ void Run(const Arguments& args, Controller* controller) {
   }
 }
 }
+
+
+
+
+
 
 int main(int argc, char** argv) {
   Arguments args({argv + 1, argv + argc});
