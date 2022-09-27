@@ -61,10 +61,10 @@ struct Arguments {
         primary_id = std::stoull(args.at(++i));
       } else if (arg == "--primary-bus") {
         primary_bus = std::stoull(args.at(++i));
-      } else if (arg == "--secondary-id") {
-        secondary_id = std::stoull(args.at(++i));
-      } else if (arg == "--secondary-bus") {
-        secondary_bus = std::stoull(args.at(++i));
+      // } else if (arg == "--secondary-id") {
+      //   secondary_id = std::stoull(args.at(++i));
+      // } else if (arg == "--secondary-bus") {
+      //   secondary_bus = std::stoull(args.at(++i));
       } else {
         throw std::runtime_error("Unknown argument: " + arg);
       }
@@ -77,8 +77,6 @@ struct Arguments {
   double period_s = 0.002;
   int primary_id = 1;
   int primary_bus = 1;
-  int secondary_id = 2;
-  int secondary_bus = 2;
 };
 
 void DisplayUsage() {
@@ -122,10 +120,9 @@ std::pair<double, double> MinMaxVoltage(
 class SampleController {
  public:
   SampleController(const Arguments& arguments) : arguments_(arguments) {
-    if ((arguments_.primary_bus == arguments_.secondary_bus) &&
-        (arguments_.primary_id == arguments_.secondary_id)) {
-      throw std::runtime_error("Servos on the same bus must have unique IDs");
-    }
+    // if ((arguments_.primary_bus == arguments_.secondary_bus) && (arguments_.primary_id == arguments_.secondary_id)) {
+    //   throw std::runtime_error("Servos on the same bus must have unique IDs");
+    // }
   }
 
   /// This is called before any control begins, and must return the
@@ -133,8 +130,8 @@ class SampleController {
   /// attached to.
   std::vector<std::pair<int, int>> servo_bus_map() const {
     return {
-      { arguments_.primary_id, arguments_.primary_bus },
-      { arguments_.secondary_id, arguments_.secondary_bus },
+      { arguments_.primary_id, arguments_.primary_bus } ,
+      // { arguments_.primary_id, arguments_.primary_bus }, { arguments_.secondary_id, arguments_.secondary_bus },
     };
   }
 
@@ -145,9 +142,9 @@ class SampleController {
   /// queries.
   void Initialize(std::vector<MoteusInterface::ServoCommand>* commands) {
     moteus::PositionResolution res;
-    res.position = moteus::Resolution::kInt16;
-    res.velocity = moteus::Resolution::kInt16;
-    res.feedforward_torque = moteus::Resolution::kInt16;
+    res.position = moteus::Resolution::kFloat;
+    res.velocity = moteus::Resolution::kFloat;
+    res.feedforward_torque = moteus::Resolution::kFloat;
     res.kp_scale = moteus::Resolution::kInt16;
     res.kd_scale = moteus::Resolution::kInt16;
     res.maximum_torque = moteus::Resolution::kIgnore;
@@ -182,19 +179,26 @@ class SampleController {
         // We start everything with a stopped command to clear faults.
         cmd.mode = moteus::Mode::kStopped;
       }
-    } else if  (cycle_count_ < 10) {
+    } else {
       // Then we control primary servo
       const auto primary = Get(status, arguments_.primary_id, arguments_.primary_bus);
-      std::cout << status << std::endl;
-      std::cout << arguments_.primary_id << std::endl;
-      std::cout << arguments_.primary_bus << std::endl;
       
       double primary_pos = primary.position;
+      // std::cout << "Primary position is " << primary_pos << std::endl;
       if (!std::isnan(primary_pos) && std::isnan(primary_initial_)) {
         primary_initial_ = primary_pos;
-      }
-    } else {
+      } 
 
+      if (!std::isnan(primary_initial_)) {
+        // std::cout << "Before " << std::endl;
+
+        (*output)[0].mode = moteus::Mode::kStopped;        
+
+        // (*output)[0].mode = moteus::Mode::kPosition;
+        // (*output)[0].position.position = primary_initial_ + double(cycle_count_) / 10000;
+        // (*output)[0].position.velocity = 0.2;
+
+      }
     }
   }
 
@@ -206,7 +210,7 @@ class SampleController {
   const Arguments arguments_;
   uint64_t cycle_count_ = 0;
   double primary_initial_ = std::numeric_limits<double>::quiet_NaN();
-  double secondary_initial_ = std::numeric_limits<double>::quiet_NaN();
+  // double secondary_initial_ = std::numeric_limits<double>::quiet_NaN();
 };
 
 
@@ -214,7 +218,7 @@ class SampleController {
 // -------------------- Runing the main cycle of the program --------------------
 
 template <typename Controller>
-void Run(const Arguments& args, Controller* controller) {
+void main_cycle(const Arguments& args, Controller* controller) {
   if (args.help) {
     DisplayUsage();
     return;
@@ -319,8 +323,7 @@ void Run(const Arguments& args, Controller* controller) {
       // We copy out the results we just got out.
       const auto rx_count = current_values.query_result_size;
       saved_replies.resize(rx_count);
-      std::copy(replies.begin(), replies.begin() + rx_count,
-                saved_replies.begin());
+      std::copy(replies.begin(), replies.begin() + rx_count, saved_replies.begin());
     }
 
     // Then we can immediately ask them to be used again.
@@ -349,7 +352,7 @@ int main(int argc, char** argv) {
   LockMemory();
 
   SampleController sample_controller{args};
-  Run(args, &sample_controller);
+  main_cycle(args, &sample_controller);
 
   return 0;
 }

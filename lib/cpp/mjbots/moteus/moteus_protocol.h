@@ -70,6 +70,8 @@ enum Register : uint32_t {
   kTorque = 0x003,
   kQCurrent = 0x004,
   kDCurrent = 0x005,
+  kAbsPosition = 0x006,
+
   kRezeroState = 0x00c,
   kVoltage = 0x00d,
   kTemperature = 0x00e,
@@ -104,10 +106,21 @@ enum Register : uint32_t {
   kPositionKi = 0x031,
   kPositionKd = 0x032,
   kPositionFeedforward = 0x033,
-  kPositionCommand = 0x034,
+  kPositionCommandTorque = 0x034,
 
+  kStayWithinLower = 0x040,
+  kStayWithinUpper = 0x041,
+  kStayWithinFeedforward = 0x042,
+  kStayWithinKpScale = 0x043,
+  kStayWithinKdScale = 0x044,
+  kStayWithinMaxTorque = 0x045,
+  kStayWithinTimeout = 0x046,
+
+  kModelNumber = 0x100,
+  kFirmwareVersion = 0x101,
   kRegisterMapVersion = 0x102,
-  kSerialNumber = 0x120,
+  kMultiplexId = 0x110,
+
   kSerialNumber1 = 0x120,
   kSerialNumber2 = 0x121,
   kSerialNumber3 = 0x122,
@@ -129,6 +142,8 @@ enum class Mode {
   kPosition = 10,
   kPositionTimeout = 11,
   kZeroVelocity = 12,
+  kStayWithinBounds = 13,
+  kMeasureInductance = 14,
   kNumModes,
 };
 
@@ -152,8 +167,12 @@ T Saturate(double value, double scale) {
   const double double_max = static_cast<T>(max);
   // We purposefully limit to +- max, rather than to min.  The minimum
   // value for our two's complement types is reserved for NaN.
-  if (scaled < -double_max) { return -max; }
-  if (scaled > double_max) { return max; }
+  if (scaled < -double_max) {
+    return -max;
+  }
+  if (scaled > double_max) {
+    return max;
+  }
   return static_cast<T>(scaled);
 }
 
@@ -164,8 +183,9 @@ struct CanFrame {
 
 class WriteCanFrame {
  public:
-  WriteCanFrame(CanFrame* frame) : data_(&frame->data[0]), size_(&frame->size) {}
-  WriteCanFrame(uint8_t* data, uint8_t* size) : data_(data), size_(size) {}
+  WriteCanFrame(CanFrame *frame)
+      : data_(&frame->data[0]), size_(&frame->size) {}
+  WriteCanFrame(uint8_t *data, uint8_t *size) : data_(data), size_(size) {}
 
   template <typename T, typename X>
   void Write(X value_in) {
@@ -177,16 +197,13 @@ class WriteCanFrame {
 #ifndef __ORDER_LITTLE_ENDIAN__
 #error "only little endian architectures supported"
 #endif
-    std::memcpy(&data_[*size_],
-                reinterpret_cast<const char*>(&value),
+    std::memcpy(&data_[*size_], reinterpret_cast<const char *>(&value),
                 sizeof(value));
     *size_ += sizeof(value);
   }
 
-  void WriteMapped(
-      double value,
-      double int8_scale, double int16_scale, double int32_scale,
-      Resolution res) {
+  void WriteMapped(double value, double int8_scale, double int16_scale,
+                   double int32_scale, Resolution res) {
     switch (res) {
       case Resolution::kInt8: {
         Write<int8_t>(Saturate<int8_t>(value, int8_scale));
@@ -223,11 +240,7 @@ class WriteCanFrame {
   }
 
   void WritePwm(double value, Resolution res) {
-    WriteMapped(value,
-                1.0 / 127.0,
-                1.0 / 32767.0,
-                1.0 / 2147483647.0,
-                res);
+    WriteMapped(value, 1.0 / 127.0, 1.0 / 32767.0, 1.0 / 2147483647.0, res);
   }
 
   void WriteVoltage(double value, Resolution res) {
@@ -243,8 +256,8 @@ class WriteCanFrame {
   }
 
  private:
-  uint8_t* const data_;
-  uint8_t* const size_;
+  uint8_t *const data_;
+  uint8_t *const size_;
 };
 
 /// Determines how to group registers when encoding them to minimize
@@ -253,9 +266,7 @@ template <size_t N>
 class WriteCombiner {
  public:
   template <typename T>
-  WriteCombiner(WriteCanFrame* frame,
-                int8_t base_command,
-                T start_register,
+  WriteCombiner(WriteCanFrame *frame, int8_t base_command, T start_register,
                 std::array<Resolution, N> resolutions)
       : frame_(frame),
         base_command_(base_command),
@@ -288,18 +299,21 @@ class WriteCombiner {
     }
 
     int count = 1;
-    for (size_t i = this_offset + 1;
-         i < N && resolutions_[i] == new_resolution;
+    for (size_t i = this_offset + 1; i < N && resolutions_[i] == new_resolution;
          i++) {
       count++;
     }
 
     int8_t write_command = base_command_ + [&]() {
       switch (new_resolution) {
-        case Resolution::kInt8: return 0x00;
-        case Resolution::kInt16: return 0x04;
-        case Resolution::kInt32: return 0x08;
-        case Resolution::kFloat: return 0x0c;
+        case Resolution::kInt8:
+          return 0x00;
+        case Resolution::kInt16:
+          return 0x04;
+        case Resolution::kInt32:
+          return 0x08;
+        case Resolution::kFloat:
+          return 0x0c;
         case Resolution::kIgnore: {
           throw std::logic_error("unreachable");
         }
@@ -323,7 +337,7 @@ class WriteCombiner {
   }
 
  private:
-  WriteCanFrame* const frame_;
+  WriteCanFrame *const frame_;
   int8_t base_command_;
   uint32_t start_register_;
   std::array<Resolution, N> resolutions_;
@@ -334,12 +348,10 @@ class WriteCombiner {
 
 class MultiplexParser {
  public:
-  MultiplexParser(const CanFrame* frame)
-      : data_(&frame->data[0]),
-        size_(frame->size) {}
-  MultiplexParser(const uint8_t* data, uint8_t size)
-      : data_(data),
-        size_(size) {}
+  MultiplexParser(const CanFrame *frame)
+      : data_(&frame->data[0]), size_(frame->size) {}
+  MultiplexParser(const uint8_t *data, uint8_t size)
+      : data_(data), size_(size) {}
 
   std::tuple<bool, uint32_t, Resolution> next() {
     if (offset_ >= size_) {
@@ -362,7 +374,9 @@ class MultiplexParser {
     // We need to look for another command.
     while (offset_ < size_) {
       const auto cmd = data_[offset_++];
-      if (cmd == Multiplex::kNop) { continue; }
+      if (cmd == Multiplex::kNop) {
+        continue;
+      }
 
       // We are guaranteed to still need data.
       if (offset_ >= size_) {
@@ -375,10 +389,14 @@ class MultiplexParser {
         const auto id = (cmd >> 2) & 0x03;
         current_resolution_ = [id]() {
           switch (id) {
-            case 0: return Resolution::kInt8;
-            case 1: return Resolution::kInt16;
-            case 2: return Resolution::kInt32;
-            case 3: return Resolution::kFloat;
+            case 0:
+              return Resolution::kInt8;
+            case 1:
+              return Resolution::kInt16;
+            case 2:
+              return Resolution::kInt32;
+            case 3:
+              return Resolution::kFloat;
           }
           // we cannot reach this point
           return Resolution::kInt8;
@@ -436,9 +454,7 @@ class MultiplexParser {
     return value;
   }
 
-  double ReadMapped(Resolution res,
-                    double int8_scale,
-                    double int16_scale,
+  double ReadMapped(Resolution res, double int8_scale, double int16_scale,
                     double int32_scale) {
     switch (res) {
       case Resolution::kInt8: {
@@ -496,23 +512,27 @@ class MultiplexParser {
     return ReadMapped(res, 1.0, 0.1, 0.001);
   }
 
-  void Ignore(Resolution res) {
-    offset_ += ResolutionSize(res);
-  }
+  void Ignore(Resolution res) { offset_ += ResolutionSize(res); }
 
  private:
   int ResolutionSize(Resolution res) {
     switch (res) {
-      case Resolution::kInt8: return 1;
-      case Resolution::kInt16: return 2;
-      case Resolution::kInt32: return 4;
-      case Resolution::kFloat: return 4;
-      default: { break; }
+      case Resolution::kInt8:
+        return 1;
+      case Resolution::kInt16:
+        return 2;
+      case Resolution::kInt32:
+        return 4;
+      case Resolution::kFloat:
+        return 4;
+      default: {
+        break;
+      }
     }
     return 1;
   }
 
-  const uint8_t* const data_;
+  const uint8_t *const data_;
   const uint8_t size_;
   size_t offset_ = 0;
 
@@ -543,15 +563,9 @@ struct PositionResolution {
   Resolution watchdog_timeout = Resolution::kFloat;
 };
 
-inline void EmitStopCommand(WriteCanFrame* frame) {
-  frame->Write<int8_t>(Multiplex::kWriteInt8 | 0x01);
-  frame->Write<int8_t>(Register::kMode);
-  frame->Write<int8_t>(Mode::kStopped);
-}
-
-inline void EmitPositionCommand(
-    WriteCanFrame* frame,
-    const PositionCommand& command, const PositionResolution& resolution) {
+inline void EmitPositionCommand(WriteCanFrame *frame,
+                                const PositionCommand &command,
+                                const PositionResolution &resolution) {
   // First, set the position mode.
   frame->Write<int8_t>(Multiplex::kWriteInt8 | 0x01);
   frame->Write<int8_t>(Register::kMode);
@@ -559,16 +573,17 @@ inline void EmitPositionCommand(
 
   // Now we use some heuristics to try and group consecutive registers
   // of the same resolution together into larger writes.
-  WriteCombiner<8> combiner(frame, 0x00, Register::kCommandPosition, {
-      resolution.position,
-          resolution.velocity,
-          resolution.feedforward_torque,
-          resolution.kp_scale,
-          resolution.kd_scale,
-          resolution.maximum_torque,
-          resolution.stop_position,
-          resolution.watchdog_timeout,
-    });
+  WriteCombiner<8> combiner(frame, 0x00, Register::kCommandPosition,
+                            {
+                                resolution.position,
+                                resolution.velocity,
+                                resolution.feedforward_torque,
+                                resolution.kp_scale,
+                                resolution.kd_scale,
+                                resolution.maximum_torque,
+                                resolution.stop_position,
+                                resolution.watchdog_timeout,
+                            });
 
   if (combiner.MaybeWrite()) {
     frame->WritePosition(command.position, resolution.position);
@@ -577,7 +592,8 @@ inline void EmitPositionCommand(
     frame->WriteVelocity(command.velocity, resolution.velocity);
   }
   if (combiner.MaybeWrite()) {
-    frame->WriteTorque(command.feedforward_torque, resolution.feedforward_torque);
+    frame->WriteTorque(command.feedforward_torque,
+                       resolution.feedforward_torque);
   }
   if (combiner.MaybeWrite()) {
     frame->WritePwm(command.kp_scale, resolution.kp_scale);
@@ -596,54 +612,126 @@ inline void EmitPositionCommand(
   }
 }
 
+struct WithinCommand {
+  float bounds_min = 0.0f;
+  float bounds_max = 0.0f;
+  double feedforward_torque = 0.0;
+  double kp_scale = 1.0;
+  double kd_scale = 1.0;
+  double maximum_torque = 0.0;
+  double stop_position = std::numeric_limits<double>::quiet_NaN();
+  double watchdog_timeout = 0.0;
+};
+
+struct WithinResolution {
+  Resolution bounds_min = Resolution::kFloat;
+  Resolution bounds_max = Resolution::kFloat;
+  Resolution feedforward_torque = Resolution::kFloat;
+  Resolution kp_scale = Resolution::kFloat;
+  Resolution kd_scale = Resolution::kFloat;
+  Resolution maximum_torque = Resolution::kFloat;
+  Resolution stop_position = Resolution::kFloat;
+  Resolution watchdog_timeout = Resolution::kFloat;
+};
+
+inline void EmitStopCommand(WriteCanFrame *frame) {
+  frame->Write<int8_t>(Multiplex::kWriteInt8 | 0x01);
+  frame->Write<int8_t>(Register::kMode);
+  frame->Write<int8_t>(Mode::kStopped);
+}
+
+inline void EmitWithinCommand(WriteCanFrame *frame,
+                              const WithinCommand &command,
+                              const WithinResolution &resolution) {
+  // First, set the within mode.
+  frame->Write<int8_t>(Multiplex::kWriteInt8 | 0x01);
+  frame->Write<int8_t>(Register::kMode);
+  frame->Write<int8_t>(Mode::kStayWithinBounds);
+
+  // Now we use some heuristics to try and group consecutive registers
+  // of the same resolution together into larger writes.
+  WriteCombiner<8> combiner(frame, 0x00, Register::kStayWithinLower,
+                            {
+                                resolution.bounds_min,
+                                resolution.bounds_max,
+                                resolution.feedforward_torque,
+                                resolution.kp_scale,
+                                resolution.kd_scale,
+                                resolution.maximum_torque,
+                                resolution.stop_position,
+                                resolution.watchdog_timeout,
+                            });
+
+  if (combiner.MaybeWrite()) {
+    frame->WriteTime(command.bounds_min, resolution.bounds_min);
+  }
+  if (combiner.MaybeWrite()) {
+    frame->WriteTime(command.bounds_max, resolution.bounds_max);
+  }
+  if (combiner.MaybeWrite()) {
+    frame->WriteTorque(command.feedforward_torque,
+                       resolution.feedforward_torque);
+  }
+  if (combiner.MaybeWrite()) {
+    frame->WritePwm(command.kp_scale, resolution.kp_scale);
+  }
+  if (combiner.MaybeWrite()) {
+    frame->WritePwm(command.kd_scale, resolution.kd_scale);
+  }
+  if (combiner.MaybeWrite()) {
+    frame->WriteTorque(command.maximum_torque, resolution.maximum_torque);
+  }
+  if (combiner.MaybeWrite()) {
+    frame->WritePosition(command.stop_position, resolution.stop_position);
+  }
+  if (combiner.MaybeWrite()) {
+    frame->WriteTime(command.watchdog_timeout, resolution.watchdog_timeout);
+  }
+}
+ 
 struct QueryCommand {
-  Resolution mode = Resolution::kInt16;
-  Resolution position = Resolution::kInt16;
-  Resolution velocity = Resolution::kInt16;
-  Resolution torque = Resolution::kInt16;
-  Resolution q_current = Resolution::kIgnore;
-  Resolution d_current = Resolution::kIgnore;
-  Resolution rezero_state = Resolution::kIgnore;
-  Resolution voltage = Resolution::kInt8;
-  Resolution temperature = Resolution::kInt8;
+  Resolution mode = Resolution::kFloat;
+  Resolution position = Resolution::kFloat;
+  Resolution velocity = Resolution::kFloat;
+  Resolution torque = Resolution::kFloat;
+  Resolution q_current = Resolution::kFloat; // was kIgnore
+  Resolution d_current = Resolution::kFloat; // was kIgnore
+  Resolution rezero_state = Resolution::kInt16; // was kIgnore
+  Resolution voltage = Resolution::kFloat;
+  Resolution temperature = Resolution::kFloat;
   Resolution fault = Resolution::kInt8;
 
   bool any_set() const {
-    return mode != Resolution::kIgnore ||
-        position != Resolution::kIgnore ||
-        velocity != Resolution::kIgnore ||
-        torque != Resolution::kIgnore ||
-        q_current != Resolution::kIgnore ||
-        d_current != Resolution::kIgnore ||
-        rezero_state != Resolution::kIgnore ||
-        voltage != Resolution::kIgnore ||
-        temperature != Resolution::kIgnore ||
-        fault != Resolution::kIgnore;
+    return mode != Resolution::kIgnore || position != Resolution::kIgnore ||
+           velocity != Resolution::kIgnore || torque != Resolution::kIgnore ||
+           q_current != Resolution::kIgnore ||
+           d_current != Resolution::kIgnore ||
+           rezero_state != Resolution::kIgnore ||
+           voltage != Resolution::kIgnore ||
+           temperature != Resolution::kIgnore || fault != Resolution::kIgnore;
   }
 };
 
-inline void EmitQueryCommand(
-    WriteCanFrame* frame,
-    const QueryCommand& command) {
+inline void EmitQueryCommand(WriteCanFrame *frame,
+                             const QueryCommand &command) {
   {
-    WriteCombiner<6> combiner(frame, 0x10, Register::kMode, {
-        command.mode,
-            command.position,
-            command.velocity,
-            command.torque,
-            command.q_current,
-            command.d_current,
-            });
+    WriteCombiner<6> combiner(frame, 0x10, Register::kMode,
+                              {
+                                  command.mode,
+                                  command.position,
+                                  command.velocity,
+                                  command.torque,
+                                  command.q_current,
+                                  command.d_current,
+                              });
     for (int i = 0; i < 6; i++) {
       combiner.MaybeWrite();
     }
   }
   {
-    WriteCombiner<4> combiner(frame, 0x10, Register::kRezeroState, {
-        command.rezero_state,
-            command.voltage,
-            command.temperature,
-            command.fault});
+    WriteCombiner<4> combiner(frame, 0x10, Register::kRezeroState,
+                              {command.rezero_state, command.voltage,
+                               command.temperature, command.fault});
     for (int i = 0; i < 4; i++) {
       combiner.MaybeWrite();
     }
@@ -663,13 +751,15 @@ struct QueryResult {
   int fault = 0;
 };
 
-inline QueryResult ParseQueryResult(const uint8_t* data, size_t size) {
+inline QueryResult ParseQueryResult(const uint8_t *data, size_t size) {
   MultiplexParser parser(data, size);
 
   QueryResult result;
   while (true) {
     auto entry = parser.next();
-    if (!std::get<0>(entry)) { break; }
+    if (!std::get<0>(entry)) {
+      break;
+    }
     const auto res = std::get<2>(entry);
     switch (static_cast<Register>(std::get<1>(entry))) {
       case Register::kMode: {
@@ -721,5 +811,5 @@ inline QueryResult ParseQueryResult(const uint8_t* data, size_t size) {
   return result;
 }
 
-}
-}
+}  // namespace moteus
+}  // namespace mjbots
