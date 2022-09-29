@@ -48,58 +48,14 @@ using MoteusInterface = moteus::Pi3HatMoteusInterface;
 namespace {
 
 struct Arguments {
-  Arguments(const std::vector<std::string>& args) {
-    for (size_t i = 0; i < args.size(); i++) {
-      const auto& arg = args[i];
-      if (arg == "-h" || arg == "--help") {
-        help = true;
-      } else if (arg == "--main-cpu") {
-        main_cpu = std::stoull(args.at(++i));
-      } else if (arg == "--can-cpu") {
-        can_cpu = std::stoull(args.at(++i));
-      } else if (arg == "--period-s") {
-        period_s = std::stod(args.at(++i));
-      } else if (arg == "--motor-id") {
-        motor_id = std::stoull(args.at(++i));
-      } else if (arg == "--motor-bus") {
-        motor_bus = std::stoull(args.at(++i));
-      } else {
-        throw std::runtime_error("Unknown argument: " + arg);
-      }
-    }
-  }
-
   // Default values
   bool help = false;
   int main_cpu = 1;
   int can_cpu = 2;
-  // TODO: change this so the "period_s" can be changed.
   double period_s = 0.01;
   int motor_id = 1;
   int motor_bus = 1;
 };
-
-// void DisplayUsage() {
-//   std::cout << "Usage: moteus_control_example [options]\n";
-//   std::cout << "\n";
-//   std::cout << "  -h, --help           display this usage message\n";
-//   std::cout << "  --main-cpu CPU       run main thread on a fixed CPU [default: 1]\n";
-//   std::cout << "  --can-cpu CPU        run CAN thread on a fixed CPU [default: 2]\n";
-//   std::cout << "  --period-s S         period to run control\n";
-//   std::cout << "  --motor-id ID        servo ID of primary, undriven servo\n";
-//   std::cout << "  --motor-bus BUS    bus of primary servo\n";
-// }
-
-// void LockMemory() {
-//   // We lock all memory so that we don't end up having to page in
-//   // something later which can take time.
-//   {
-//     const int r = ::mlockall(MCL_CURRENT | MCL_FUTURE);
-//     if (r < 0) {
-//       throw std::runtime_error("Error locking memory");
-//     }
-//   }
-// }
 
 std::pair<double, double> MinMaxVoltage(const std::vector<MoteusInterface::ServoReply>& r) {
   double rmin = std::numeric_limits<double>::infinity();
@@ -118,11 +74,6 @@ class SampleController {
  public:
   SampleController(const Arguments& arguments) : arguments_(arguments) {
   }
-
-  // SampleController() {
-  //   // Empty constructor. The members have default values.
-  // }
-
 
   /// This is called before any control begins, and must return the
   /// set of servos that are used, along with which bus each is
@@ -168,33 +119,47 @@ class SampleController {
   /// @p output should hold the desired output.  It will be
   /// pre-populated with the result of the last command cycle, (or
   /// Initialize to begin with).
-  void Run(const std::vector<MoteusInterface::ServoReply>& status, std::vector<MoteusInterface::ServoCommand>* output) {
-    cycle_count_++;
 
-    // This is where your control loop would go.
+  // void Run(const std::vector<MoteusInterface::ServoReply>& status, std::vector<MoteusInterface::ServoCommand>* output) {
+  //   cycle_count_++;
 
-    if (cycle_count_ < 5) {
-      for (auto& cmd : *output) {
-        // We start everything with a stopped command to clear faults.
-        cmd.mode = moteus::Mode::kStopped;
-      }
-    } else {
-      // Then we control primary servo
-      const auto motor = Get(status, arguments_.motor_id, arguments_.motor_bus);
+  //   // This is where your control loop would go.
+
+  //   if (cycle_count_ < 5) {
+  //     for (auto& cmd : *output) {
+  //       // We start everything with a stopped command to clear faults.
+  //       cmd.mode = moteus::Mode::kStopped;
+  //     }
+  //   } else {
+  //     // Then we control primary servo
+  //     const auto motor = Get(status, arguments_.motor_id, arguments_.motor_bus);
       
-      double motor_pos = motor.position;
+  //     double motor_pos = motor.position;
 
-      // Set primary position of the motor
-      if (!std::isnan(motor_pos) && std::isnan(motor_initial_pos_)) {
-        motor_initial_pos_ = motor_pos;
-      } 
+  //     // Set primary position of the motor
+  //     if (!std::isnan(motor_pos) && std::isnan(motor_initial_pos_)) {
+  //       motor_initial_pos_ = motor_pos;
+  //     } 
 
-      if (!std::isnan(motor_initial_pos_)) {
-        (*output)[0].mode = moteus::Mode::kStopped;        
-        // (*output)[0].mode = moteus::Mode::kPosition;
-        // (*output)[0].position.position = motor_initial_pos_ + double(cycle_count_) / 10000;
-        // (*output)[0].position.velocity = 0.2;
-      }
+  //     if (!std::isnan(motor_initial_pos_)) {
+  //       // (*output)[0].mode = moteus::Mode::kStopped;        
+  //       (*output)[0].mode = moteus::Mode::kPosition;
+  //       (*output)[0].position.position = motor_initial_pos_ + double(cycle_count_) / 10000;
+  //       (*output)[0].position.velocity = 0.2;
+  //     }
+  //   }
+  // }
+
+  void SetPosition(const std::vector<MoteusInterface::ServoReply>& status, std::vector<MoteusInterface::ServoCommand>* output, double position, double velocity) {
+    const auto motor = Get(status, arguments_.motor_id, arguments_.motor_bus);
+    double motor_pos = motor.position;
+
+    if (!std::isnan(motor_initial_pos_)) {     
+      (*output)[0].mode = moteus::Mode::kPosition;
+      (*output)[0].position.position = motor_initial_pos_ + position;
+      (*output)[0].position.velocity = velocity;
+      (*output)[0].position.maximum_torque = 0.05;
+      
     }
   }
 
@@ -205,6 +170,10 @@ class SampleController {
 
   void ResetInitPos(const std::vector<MoteusInterface::ServoReply>& status, std::vector<MoteusInterface::ServoCommand>* output) {
     cycle_count_++;
+    for (auto& cmd : *output) {
+        // We start everything with a stopped command to clear faults.
+      cmd.mode = moteus::Mode::kStopped;
+    }
     const auto motor = Get(status, arguments_.motor_id, arguments_.motor_bus);
     double motor_pos = motor.position;
     if (!std::isnan(motor_pos)) {
@@ -212,8 +181,8 @@ class SampleController {
     } 
   }
 
- private:
   const Arguments arguments_;
+ private:
   uint64_t cycle_count_ = 0;
   double motor_initial_pos_ = std::numeric_limits<double>::quiet_NaN();
 };
@@ -224,28 +193,17 @@ class SampleController {
 // ---------------------------------------------
 
 std::unique_ptr<SampleController> sample_controller;
-std::unique_ptr<MoteusInterface> moteus_interface;
+std::unique_ptr<MoteusInterface> moteus_interface; 
 
 // -------------------- Runing the main cycle of the program --------------------
 
 // template <typename Controller>
 // void main_cycle(const Arguments& args, Controller* controller) {
 
-void main_cycle(const Arguments& args) {
-  if (args.help) {
-    // DisplayUsage();
-    return;
-  }
+// void main_cycle(const Arguments& args) {
+void main_cycle() {
+  // moteus::ConfigureRealtime(args.main_cpu); // Maybe not necessary when used with ERT linux
 
-  moteus::ConfigureRealtime(args.main_cpu); // Maybe not necessary when used with ERT linux
-
-
-  // Initialize moteus_interface
-  MoteusInterface::Options moteus_options;
-  moteus_options.cpu = args.can_cpu;
-  moteus_interface = std::make_unique<MoteusInterface>(moteus_options);
-
-  // MoteusInterface moteus_interface{moteus_options};
 
   std::vector<MoteusInterface::ServoCommand> commands; // Each entry in the vector is for each controlled motor.
   for (const auto& id_bus_mappings : sample_controller->servo_bus_map()) {
@@ -265,7 +223,7 @@ void main_cycle(const Arguments& args) {
 
   std::future<MoteusInterface::Output> can_result;
 
-  const auto period = std::chrono::microseconds(static_cast<int64_t>(args.period_s * 1e6));
+  const auto period = std::chrono::microseconds(static_cast<int64_t>(sample_controller->arguments_.period_s * 1e6));
   auto next_cycle = std::chrono::steady_clock::now() + period;
 
   const auto status_period = std::chrono::milliseconds(100);
@@ -275,7 +233,7 @@ void main_cycle(const Arguments& args) {
   uint64_t margin_cycles = 0;
 
   // We will run at a fixed cycle time.
-  while (true) {
+  while (cycle_count < 1000) {
     cycle_count++;
     margin_cycles++;
     {
@@ -329,33 +287,104 @@ void main_cycle(const Arguments& args) {
     next_cycle += period;
 
     // ------------------------------------- HERE, we are calling the controller -------------------------------------
-    sample_controller->Run(saved_replies, &commands);
+    if (cycle_count < 5) {
+      sample_controller->ResetInitPos(saved_replies, &commands);
 
+      if (can_result.valid()) { // Just to avoid some runtime error.
+        // Now we get the result of our last query and send off our new one.
+        const auto current_values = can_result.get();
 
-    if (can_result.valid()) {
-      // Now we get the result of our last query and send off our new
-      // one.
-      const auto current_values = can_result.get();
+        // We copy out the results we just got out.
+        const auto rx_count = current_values.query_result_size;
+        saved_replies.resize(rx_count);
+        std::copy(replies.begin(), replies.begin() + rx_count, saved_replies.begin());
+      }
 
-      // We copy out the results we just got out.
-      const auto rx_count = current_values.query_result_size;
-      saved_replies.resize(rx_count);
-      std::copy(replies.begin(), replies.begin() + rx_count, saved_replies.begin());
+      // Then we can immediately ask them to be used again.
+      auto promise = std::make_shared<std::promise<MoteusInterface::Output>>();
+      moteus_interface->Cycle(
+          moteus_data,
+          [promise](const MoteusInterface::Output& output) {
+            // This is called from an arbitrary thread, so we just set the promise value here.
+            promise->set_value(output);
+          });
+      can_result = promise->get_future();
+
+    } else if (cycle_count < 990) {
+
+      // sample_controller->Run(saved_replies, &commands);
+      sample_controller->SetPosition(saved_replies, &commands, 0, 0.1);
+      //////////////////
+      if (can_result.valid()) { // Just to avoid some runtime error.
+        // Now we get the result of our last query and send off our new one.
+        const auto current_values = can_result.get();
+
+        // We copy out the results we just got out.
+        const auto rx_count = current_values.query_result_size;
+        saved_replies.resize(rx_count);
+        std::copy(replies.begin(), replies.begin() + rx_count, saved_replies.begin());
+      }
+
+      // Then we can immediately ask them to be used again.
+      auto promise = std::make_shared<std::promise<MoteusInterface::Output>>();
+      moteus_interface->Cycle(
+          moteus_data,
+          [promise](const MoteusInterface::Output& output) {
+            // This is called from an arbitrary thread, so we just set the promise value here.
+            promise->set_value(output);
+          });
+      can_result = promise->get_future();
+
+    } else {
+      sample_controller->Stop(saved_replies, &commands);
+      // // //////////////////
+      if (can_result.valid()) { // Just to avoid some runtime error.
+        // Now we get the result of our last query and send off our new one.
+        const auto current_values = can_result.get(); // here, we have wait, so we wait until we get the value created by the second thread
+        // std::cout << "Can result is valid" << std::endl;
+        // // We copy out the results we just got out.
+        const auto rx_count = current_values.query_result_size;
+        saved_replies.resize(rx_count);
+        std::copy(replies.begin(), replies.begin() + rx_count, saved_replies.begin());
+      } else {
+        // std::cout << "Can result is not valid" << std::endl;
+      }
+
+      // Then we can immediately ask them to be used again. The function "Cycle" also send our current commands
+      auto promise = std::make_shared<std::promise<MoteusInterface::Output>>();
+      moteus_interface->Cycle(moteus_data,[promise](const MoteusInterface::Output& output) {
+            // This is called from an arbitrary thread, so we just set the promise value here.
+            promise->set_value(output);});
+      can_result = promise->get_future();
+
+      //////////////////
     }
-
-    // Then we can immediately ask them to be used again.
-    auto promise = std::make_shared<std::promise<MoteusInterface::Output>>();
-    moteus_interface->Cycle(
-        moteus_data,
-        [promise](const MoteusInterface::Output& output) {
-          // This is called from an arbitrary thread, so we just set
-          // the promise value here.
-          promise->set_value(output);
-        });
-    can_result = promise->get_future();
   }
+
+  
 }
+
+
+
+
+void Init_pi3hat(double ctrl_period) {
+  Arguments args;
+  args.period_s = ctrl_period;
+  //TODO: set other parameters
+
+  // Initialize moteus interface. 
+  MoteusInterface::Options moteus_options;
+  moteus_options.cpu = args.can_cpu;
+  // This creates thread that sends and reads CAN messages
+  moteus_interface = std::make_unique<MoteusInterface>(moteus_options);
+
+  // Initialize the controller
+  sample_controller = std::make_unique<SampleController>(args);
 }
+
+
+
+} // namespace end
 
 
 
@@ -363,15 +392,19 @@ void main_cycle(const Arguments& args) {
 
 
 int main(int argc, char** argv) {
-  Arguments args({argv + 1, argv + argc});
+  
 
   // Lock memory for the whole process.
   // LockMemory();
+  double ctrl_period = 0.01;
+  Init_pi3hat(ctrl_period);
 
-  // SampleController sample_controller{args};
-  sample_controller = std::make_unique<SampleController>(args);
 
-  main_cycle(args);
+
+
+
+
+  main_cycle();
 
   return 0;
 }
