@@ -23,10 +23,10 @@
 #include <thread>
 #include <vector>
 
-#include "mjbots/pi3hat/pi3hat.h"
+#include "pi3hat.h"
 
-#include "mjbots/moteus/moteus_protocol.h"
-#include "mjbots/moteus/realtime.h"
+#include "moteus_protocol.h"
+#include "realtime.h"
 
 namespace mjbots {
 namespace moteus {

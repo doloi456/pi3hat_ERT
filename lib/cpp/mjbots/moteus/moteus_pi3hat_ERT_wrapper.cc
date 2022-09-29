@@ -36,6 +36,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <memory>
 
 #include "moteus_protocol.h"
 #include "pi3hat_moteus_interface.h"
@@ -45,6 +46,7 @@ using namespace mjbots;
 using MoteusInterface = moteus::Pi3HatMoteusInterface;
 
 namespace {
+
 struct Arguments {
   Arguments(const std::vector<std::string>& args) {
     for (size_t i = 0; i < args.size(); i++) {
@@ -57,54 +59,49 @@ struct Arguments {
         can_cpu = std::stoull(args.at(++i));
       } else if (arg == "--period-s") {
         period_s = std::stod(args.at(++i));
-      } else if (arg == "--primary-id") {
-        primary_id = std::stoull(args.at(++i));
-      } else if (arg == "--primary-bus") {
-        primary_bus = std::stoull(args.at(++i));
-      // } else if (arg == "--secondary-id") {
-      //   secondary_id = std::stoull(args.at(++i));
-      // } else if (arg == "--secondary-bus") {
-      //   secondary_bus = std::stoull(args.at(++i));
+      } else if (arg == "--motor-id") {
+        motor_id = std::stoull(args.at(++i));
+      } else if (arg == "--motor-bus") {
+        motor_bus = std::stoull(args.at(++i));
       } else {
         throw std::runtime_error("Unknown argument: " + arg);
       }
     }
   }
 
+  // Default values
   bool help = false;
   int main_cpu = 1;
   int can_cpu = 2;
-  double period_s = 0.002;
-  int primary_id = 1;
-  int primary_bus = 1;
+  // TODO: change this so the "period_s" can be changed.
+  double period_s = 0.01;
+  int motor_id = 1;
+  int motor_bus = 1;
 };
 
-void DisplayUsage() {
-  std::cout << "Usage: moteus_control_example [options]\n";
-  std::cout << "\n";
-  std::cout << "  -h, --help           display this usage message\n";
-  std::cout << "  --main-cpu CPU       run main thread on a fixed CPU [default: 1]\n";
-  std::cout << "  --can-cpu CPU        run CAN thread on a fixed CPU [default: 2]\n";
-  std::cout << "  --period-s S         period to run control\n";
-  std::cout << "  --primary-id ID      servo ID of primary, undriven servo\n";
-  std::cout << "  --primary-bus BUS    bus of primary servo\n";
-  std::cout << "  --secondary-id ID    servo ID of secondary, driven servo\n";
-  std::cout << "  --secondary-bus BUS  bus of secondary servo\n";
-}
+// void DisplayUsage() {
+//   std::cout << "Usage: moteus_control_example [options]\n";
+//   std::cout << "\n";
+//   std::cout << "  -h, --help           display this usage message\n";
+//   std::cout << "  --main-cpu CPU       run main thread on a fixed CPU [default: 1]\n";
+//   std::cout << "  --can-cpu CPU        run CAN thread on a fixed CPU [default: 2]\n";
+//   std::cout << "  --period-s S         period to run control\n";
+//   std::cout << "  --motor-id ID        servo ID of primary, undriven servo\n";
+//   std::cout << "  --motor-bus BUS    bus of primary servo\n";
+// }
 
-void LockMemory() {
-  // We lock all memory so that we don't end up having to page in
-  // something later which can take time.
-  {
-    const int r = ::mlockall(MCL_CURRENT | MCL_FUTURE);
-    if (r < 0) {
-      throw std::runtime_error("Error locking memory");
-    }
-  }
-}
+// void LockMemory() {
+//   // We lock all memory so that we don't end up having to page in
+//   // something later which can take time.
+//   {
+//     const int r = ::mlockall(MCL_CURRENT | MCL_FUTURE);
+//     if (r < 0) {
+//       throw std::runtime_error("Error locking memory");
+//     }
+//   }
+// }
 
-std::pair<double, double> MinMaxVoltage(
-    const std::vector<MoteusInterface::ServoReply>& r) {
+std::pair<double, double> MinMaxVoltage(const std::vector<MoteusInterface::ServoReply>& r) {
   double rmin = std::numeric_limits<double>::infinity();
   double rmax = -std::numeric_limits<double>::infinity();
 
@@ -120,19 +117,18 @@ std::pair<double, double> MinMaxVoltage(
 class SampleController {
  public:
   SampleController(const Arguments& arguments) : arguments_(arguments) {
-    // if ((arguments_.primary_bus == arguments_.secondary_bus) && (arguments_.primary_id == arguments_.secondary_id)) {
-    //   throw std::runtime_error("Servos on the same bus must have unique IDs");
-    // }
   }
+
+  // SampleController() {
+  //   // Empty constructor. The members have default values.
+  // }
+
 
   /// This is called before any control begins, and must return the
   /// set of servos that are used, along with which bus each is
   /// attached to.
   std::vector<std::pair<int, int>> servo_bus_map() const {
-    return {
-      { arguments_.primary_id, arguments_.primary_bus } ,
-      // { arguments_.primary_id, arguments_.primary_bus }, { arguments_.secondary_id, arguments_.secondary_bus },
-    };
+    return {{ arguments_.motor_id, arguments_.motor_bus }};
   }
 
   /// This is also called before any control begins.  @p commands will
@@ -150,6 +146,7 @@ class SampleController {
     res.maximum_torque = moteus::Resolution::kIgnore;
     res.stop_position = moteus::Resolution::kIgnore;
     res.watchdog_timeout = moteus::Resolution::kIgnore;
+    // For every motor, set the resolutions
     for (auto& cmd : *commands) {
       cmd.resolution = res;
     }
@@ -157,7 +154,9 @@ class SampleController {
 
   moteus::QueryResult Get(const std::vector<MoteusInterface::ServoReply>& replies, int id, int bus) {
     for (const auto& item : replies) {
-      if (item.id == id && item.bus == bus) { return item.result; }
+      if (item.id == id && item.bus == bus) { 
+        return item.result; 
+      }
     }
     return {};
   }
@@ -181,65 +180,84 @@ class SampleController {
       }
     } else {
       // Then we control primary servo
-      const auto primary = Get(status, arguments_.primary_id, arguments_.primary_bus);
+      const auto motor = Get(status, arguments_.motor_id, arguments_.motor_bus);
       
-      double primary_pos = primary.position;
-      // std::cout << "Primary position is " << primary_pos << std::endl;
-      if (!std::isnan(primary_pos) && std::isnan(primary_initial_)) {
-        primary_initial_ = primary_pos;
+      double motor_pos = motor.position;
+
+      // Set primary position of the motor
+      if (!std::isnan(motor_pos) && std::isnan(motor_initial_pos_)) {
+        motor_initial_pos_ = motor_pos;
       } 
 
-      if (!std::isnan(primary_initial_)) {
-        // std::cout << "Before " << std::endl;
-
+      if (!std::isnan(motor_initial_pos_)) {
         (*output)[0].mode = moteus::Mode::kStopped;        
-
         // (*output)[0].mode = moteus::Mode::kPosition;
-        // (*output)[0].position.position = primary_initial_ + double(cycle_count_) / 10000;
+        // (*output)[0].position.position = motor_initial_pos_ + double(cycle_count_) / 10000;
         // (*output)[0].position.velocity = 0.2;
-
       }
     }
   }
 
+  void Stop(const std::vector<MoteusInterface::ServoReply>& status, std::vector<MoteusInterface::ServoCommand>* output) {
+    cycle_count_++;
+    (*output)[0].mode = moteus::Mode::kStopped;   
+  }
 
-
-
+  void ResetInitPos(const std::vector<MoteusInterface::ServoReply>& status, std::vector<MoteusInterface::ServoCommand>* output) {
+    cycle_count_++;
+    const auto motor = Get(status, arguments_.motor_id, arguments_.motor_bus);
+    double motor_pos = motor.position;
+    if (!std::isnan(motor_pos)) {
+        motor_initial_pos_ = motor_pos;
+    } 
+  }
 
  private:
   const Arguments arguments_;
   uint64_t cycle_count_ = 0;
-  double primary_initial_ = std::numeric_limits<double>::quiet_NaN();
-  // double secondary_initial_ = std::numeric_limits<double>::quiet_NaN();
+  double motor_initial_pos_ = std::numeric_limits<double>::quiet_NaN();
 };
 
 
+// ---------------------------------------------
+// -------------- Global Variable --------------
+// ---------------------------------------------
+
+std::unique_ptr<SampleController> sample_controller;
+std::unique_ptr<MoteusInterface> moteus_interface;
 
 // -------------------- Runing the main cycle of the program --------------------
 
-template <typename Controller>
-void main_cycle(const Arguments& args, Controller* controller) {
+// template <typename Controller>
+// void main_cycle(const Arguments& args, Controller* controller) {
+
+void main_cycle(const Arguments& args) {
   if (args.help) {
-    DisplayUsage();
+    // DisplayUsage();
     return;
   }
 
-  moteus::ConfigureRealtime(args.main_cpu);
+  moteus::ConfigureRealtime(args.main_cpu); // Maybe not necessary when used with ERT linux
+
+
+  // Initialize moteus_interface
   MoteusInterface::Options moteus_options;
   moteus_options.cpu = args.can_cpu;
-  MoteusInterface moteus_interface{moteus_options};
+  moteus_interface = std::make_unique<MoteusInterface>(moteus_options);
 
-  std::vector<MoteusInterface::ServoCommand> commands;
-  for (const auto& pair : controller->servo_bus_map()) {
+  // MoteusInterface moteus_interface{moteus_options};
+
+  std::vector<MoteusInterface::ServoCommand> commands; // Each entry in the vector is for each controlled motor.
+  for (const auto& id_bus_mappings : sample_controller->servo_bus_map()) {
     commands.push_back({});
-    commands.back().id = pair.first;
-    commands.back().bus = pair.second;
+    commands.back().id = id_bus_mappings.first;
+    commands.back().bus = id_bus_mappings.second;
   }
 
   std::vector<MoteusInterface::ServoReply> replies{commands.size()};
   std::vector<MoteusInterface::ServoReply> saved_replies;
 
-  controller->Initialize(&commands);
+  sample_controller->Initialize(&commands);
 
   MoteusInterface::Data moteus_data;
   moteus_data.commands = { commands.data(), commands.size() };
@@ -247,8 +265,7 @@ void main_cycle(const Arguments& args, Controller* controller) {
 
   std::future<MoteusInterface::Output> can_result;
 
-  const auto period =
-      std::chrono::microseconds(static_cast<int64_t>(args.period_s * 1e6));
+  const auto period = std::chrono::microseconds(static_cast<int64_t>(args.period_s * 1e6));
   auto next_cycle = std::chrono::steady_clock::now() + period;
 
   const auto status_period = std::chrono::milliseconds(100);
@@ -312,7 +329,7 @@ void main_cycle(const Arguments& args, Controller* controller) {
     next_cycle += period;
 
     // ------------------------------------- HERE, we are calling the controller -------------------------------------
-    controller->Run(saved_replies, &commands);
+    sample_controller->Run(saved_replies, &commands);
 
 
     if (can_result.valid()) {
@@ -328,7 +345,7 @@ void main_cycle(const Arguments& args, Controller* controller) {
 
     // Then we can immediately ask them to be used again.
     auto promise = std::make_shared<std::promise<MoteusInterface::Output>>();
-    moteus_interface.Cycle(
+    moteus_interface->Cycle(
         moteus_data,
         [promise](const MoteusInterface::Output& output) {
           // This is called from an arbitrary thread, so we just set
@@ -349,10 +366,12 @@ int main(int argc, char** argv) {
   Arguments args({argv + 1, argv + argc});
 
   // Lock memory for the whole process.
-  LockMemory();
+  // LockMemory();
 
-  SampleController sample_controller{args};
-  main_cycle(args, &sample_controller);
+  // SampleController sample_controller{args};
+  sample_controller = std::make_unique<SampleController>(args);
+
+  main_cycle(args);
 
   return 0;
 }
