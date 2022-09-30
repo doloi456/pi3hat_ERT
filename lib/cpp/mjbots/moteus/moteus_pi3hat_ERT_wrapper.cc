@@ -57,17 +57,28 @@ struct Arguments {
   int motor_bus = 1;
 };
 
-std::pair<double, double> MinMaxVoltage(const std::vector<MoteusInterface::ServoReply>& r) {
-  double rmin = std::numeric_limits<double>::infinity();
-  double rmax = -std::numeric_limits<double>::infinity();
+// std::pair<double, double> MinMaxVoltage(const std::vector<MoteusInterface::ServoReply>& r) {
+//   double rmin = std::numeric_limits<double>::infinity();
+//   double rmax = -std::numeric_limits<double>::infinity();
 
-  for (const auto& i : r) {
-    if (i.result.voltage > rmax) { rmax = i.result.voltage; }
-    if (i.result.voltage < rmin) { rmin = i.result.voltage; }
-  }
+//   for (const auto& i : r) {
+//     if (i.result.voltage > rmax) { rmax = i.result.voltage; }
+//     if (i.result.voltage < rmin) { rmin = i.result.voltage; }
+//   }
 
-  return std::make_pair(rmin, rmax);
-}
+//   return std::make_pair(rmin, rmax);
+// }
+
+class CAN_comm {
+  public:
+    CAN_comm() {
+
+    }
+
+  std::vector<MoteusInterface::ServoReply> replies{1}; // TODO: make the vector according to num of controlled motors
+  std::vector<MoteusInterface::ServoReply> saved_replies;
+};
+
 
 /// This holds the user-defined control logic.
 class SampleController {
@@ -164,6 +175,7 @@ class SampleController {
   const Arguments arguments_;
   double motor_initial_pos_ = std::numeric_limits<double>::quiet_NaN();
   std::vector<MoteusInterface::ServoCommand> commands; // Each entry in the vector is for each controlled motor.
+  int num_motors = 1;
 
  private:
   
@@ -176,27 +188,44 @@ class SampleController {
 
 std::unique_ptr<SampleController> sample_controller;
 std::unique_ptr<MoteusInterface> moteus_interface; 
+std::future<MoteusInterface::Output> can_result; // To hold CAN communication result
+CAN_comm can_comm_obj;
 
 
 // -------------------- Runing the main cycle of the program --------------------
 
+// void read_and_write_CAN() {
+//   if (can_result.valid()) { // At the beginning, can_result is not valid
+//     // Now we get the result of our last query and send off our new one.
+//     const auto current_values = can_result.get();
+
+//     // We copy out the results we just got out.
+//     const auto rx_count = current_values.query_result_size;
+//     saved_replies.resize(rx_count);
+//     std::copy(replies.begin(), replies.begin() + rx_count, saved_replies.begin());
+//   }
+//   // Then we can immediately ask them to be used again.
+//   auto promise = std::make_shared<std::promise<MoteusInterface::Output>>();
+//   moteus_interface->Cycle(
+//       moteus_data,
+//       [promise](const MoteusInterface::Output& output) {
+//         // This is called from an arbitrary thread, so we just set the promise value here.
+//         promise->set_value(output);
+//       });
+//   can_result = promise->get_future();
+// }
+
+
 void main_cycle() {
   // moteus::ConfigureRealtime(args.main_cpu); // Maybe not necessary when used with ERT linux
-
-
-
   sample_controller->Initialize(&sample_controller->commands);
-
-  std::vector<MoteusInterface::ServoReply> replies{sample_controller->commands.size()};
-  std::vector<MoteusInterface::ServoReply> saved_replies;
-
+  std::cout << "Size: " << sample_controller->commands.size() << std::endl;
+  // std::vector<MoteusInterface::ServoReply> replies{sample_controller->num_motors};
   
 
   MoteusInterface::Data moteus_data; // This hold commands that we set using Controller and that is read by CAN communication interface
   moteus_data.commands = { sample_controller->commands.data(), sample_controller->commands.size() };
-  moteus_data.replies = { replies.data(), replies.size() };
-
-  std::future<MoteusInterface::Output> can_result;
+  moteus_data.replies = { can_comm_obj.replies.data(), can_comm_obj.replies.size() };
 
   const auto period = std::chrono::microseconds(static_cast<int64_t>(sample_controller->arguments_.period_s * 1e6));
   auto next_cycle = std::chrono::steady_clock::now() + period;
@@ -208,19 +237,17 @@ void main_cycle() {
   uint64_t margin_cycles = 0;
 
   // We will run at a fixed cycle time.
-  while (cycle_count < 1000) {
+  while (cycle_count < 50) {
     cycle_count++;
     margin_cycles++;
 
-    // std::cout << "Init pos is: " << sample_controller->motor_initial_pos_ << std::endl;
     const auto now = std::chrono::steady_clock::now();
     if (now > next_status) {
-      // const auto volts = MinMaxVoltage(saved_replies);
       const std::string modes = [&]() {
         std::ostringstream result;
         result.precision(4);
         result << std::fixed;
-        for (const auto& item : saved_replies) {
+        for (const auto& item : can_comm_obj.saved_replies) {
           result << item.id << "/"
                   << item.bus << "/"
                   << static_cast<int>(item.result.mode) << "/"
@@ -228,14 +255,7 @@ void main_cycle() {
         }
         return result.str();
       }();
-      // std::cout << std::setprecision(6) << std::fixed
-      //           << "Cycles " << cycle_count
-      //           << "  margin: " << (total_margin / margin_cycles)
-      //           << std::setprecision(1)
-      //           << "  volts: " << volts.first << "/" << volts.second
-      //           << "  modes: " << modes
-      //           << "   \r";
-      // std::cout.flush();
+
       next_status += status_period;
       total_margin = 0;
       margin_cycles = 0;
@@ -246,9 +266,6 @@ void main_cycle() {
       skip_count++;
       next_cycle += period;
     }
-      // if (skip_count) {
-      //   std::cout << "\nSkipped " << skip_count << " cycles\n";
-      // }
 
     // Wait for the next control cycle to come up.
     const auto pre_sleep = std::chrono::steady_clock::now();
@@ -258,20 +275,19 @@ void main_cycle() {
     total_margin += elapsed.count();
     next_cycle += period;
 
-
+    
     if (cycle_count < 5) {
-      sample_controller->ResetInitPos(saved_replies, &sample_controller->commands);
+      sample_controller->ResetInitPos(can_comm_obj.saved_replies, &sample_controller->commands);
 
-      if (can_result.valid()) { // Just to avoid some runtime error.
+      if (can_result.valid()) { // At the beginning, can_result is not valid
         // Now we get the result of our last query and send off our new one.
         const auto current_values = can_result.get();
 
         // We copy out the results we just got out.
         const auto rx_count = current_values.query_result_size;
-        saved_replies.resize(rx_count);
-        std::copy(replies.begin(), replies.begin() + rx_count, saved_replies.begin());
+        can_comm_obj.saved_replies.resize(rx_count);
+        std::copy(can_comm_obj.replies.begin(), can_comm_obj.replies.begin() + rx_count, can_comm_obj.saved_replies.begin());
       }
-
       // Then we can immediately ask them to be used again.
       auto promise = std::make_shared<std::promise<MoteusInterface::Output>>();
       moteus_interface->Cycle(
@@ -282,7 +298,7 @@ void main_cycle() {
           });
       can_result = promise->get_future();
 
-    } else if (cycle_count < 990) {
+    } else if (cycle_count < 490) {
 
       // sample_controller->Run(saved_replies, &commands);
       sample_controller->SetPosition(&sample_controller->commands, 3);
@@ -293,8 +309,8 @@ void main_cycle() {
 
         // We copy out the results we just got out.
         const auto rx_count = current_values.query_result_size;
-        saved_replies.resize(rx_count);
-        std::copy(replies.begin(), replies.begin() + rx_count, saved_replies.begin());
+        can_comm_obj.saved_replies.resize(rx_count);
+        std::copy(can_comm_obj.replies.begin(), can_comm_obj.replies.begin() + rx_count, can_comm_obj.saved_replies.begin());
       }
 
       // Then we can immediately ask them to be used again.
@@ -316,8 +332,8 @@ void main_cycle() {
 
         // // We copy out the results we just got out.
         const auto rx_count = current_values.query_result_size;
-        saved_replies.resize(rx_count);
-        std::copy(replies.begin(), replies.begin() + rx_count, saved_replies.begin());
+        can_comm_obj.saved_replies.resize(rx_count);
+        std::copy(can_comm_obj.replies.begin(), can_comm_obj.replies.begin() + rx_count, can_comm_obj.saved_replies.begin());
       }
 
       // Then we can immediately ask them to be used again. The function "Cycle" also send our current commands
