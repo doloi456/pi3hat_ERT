@@ -12,16 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-/// @file
-///
-/// This is a simple application that demonstrates how to efficiently
-/// monitor and control multiple moteus servos at a high rate using
-/// the pi3hat.
-///
-/// It is contained in a single file for the purposes of
-/// demonstration.  A real application should likely be implemented in
-/// multiple translation units or structured for longer term
-/// maintenance.
+// Modified by Loi Do, 2022, doloi@fel.cvut.cz
+
 
 #include <sys/mman.h>
 
@@ -38,36 +30,20 @@
 #include <vector>
 #include <memory>
 
-#include "moteus_protocol.h"
-#include "pi3hat_moteus_interface.h"
+#include "moteus_pi3hat_ERT_wrapper.h"
 
 using namespace mjbots;
-
 using MoteusInterface = moteus::Pi3HatMoteusInterface;
 
-namespace {
 
 struct Arguments {
   // Default values
-  bool help = false;
   int main_cpu = 1;
   int can_cpu = 2;
   double period_s = 0.01;
   int motor_id = 1;
   int motor_bus = 1;
 };
-
-// std::pair<double, double> MinMaxVoltage(const std::vector<MoteusInterface::ServoReply>& r) {
-//   double rmin = std::numeric_limits<double>::infinity();
-//   double rmax = -std::numeric_limits<double>::infinity();
-
-//   for (const auto& i : r) {
-//     if (i.result.voltage > rmax) { rmax = i.result.voltage; }
-//     if (i.result.voltage < rmin) { rmin = i.result.voltage; }
-//   }
-
-//   return std::make_pair(rmin, rmax);
-// }
 
 
 
@@ -180,7 +156,6 @@ class SampleController {
 
 std::unique_ptr<SampleController> sample_controller;
 std::unique_ptr<MoteusInterface> moteus_interface; 
-MoteusInterface::Data moteus_data; // This hold commands that we set using Controller and that is read by CAN interface
 
 
 class CAN_comm {
@@ -209,7 +184,7 @@ class CAN_comm {
           });
       can_result = promise->get_future();
     }
-
+  MoteusInterface::Data moteus_data; // This hold commands that we set using Controller and that is read by CAN interface
   std::future<MoteusInterface::Output> can_result; // To hold CAN communication result
   std::vector<MoteusInterface::ServoReply> replies{1}; // TODO: make the vector according to num of controlled motors
   std::vector<MoteusInterface::ServoReply> saved_replies;
@@ -218,29 +193,62 @@ class CAN_comm {
 CAN_comm can_comm_obj;
 
 
+// --------------------------------------------------------------------------------
+// --------------------------------------------------------------------------------
+// --------------------------------------------------------------------------------
 
-// -------------------- Runing the main cycle of the program --------------------
+void setPosition(real64_T pos) {
+  sample_controller->SetPosition(&sample_controller->commands, pos);
+  can_comm_obj.read_and_write();
+}
 
-// void read_and_write_CAN() {
-//   if (can_result.valid()) { // At the beginning, can_result is not valid
-//     // Now we get the result of our last query and send off our new one.
-//     const auto current_values = can_result.get();
+void readPosition(real64_T* out_pos) {
+  double current_pos = 0;
+  sample_controller->ReadPosition(can_comm_obj.saved_replies, &current_pos);
+  std::cout << "Curr pos: " << current_pos << std::endl;
+  *out_pos = current_pos;
+}
 
-//     // We copy out the results we just got out.
-//     const auto rx_count = current_values.query_result_size;
-//     saved_replies.resize(rx_count);
-//     std::copy(replies.begin(), replies.begin() + rx_count, saved_replies.begin());
-//   }
-//   // Then we can immediately ask them to be used again.
-//   auto promise = std::make_shared<std::promise<MoteusInterface::Output>>();
-//   moteus_interface->Cycle(
-//       moteus_data,
-//       [promise](const MoteusInterface::Output& output) {
-//         // This is called from an arbitrary thread, so we just set the promise value here.
-//         promise->set_value(output);
-//       });
-//   can_result = promise->get_future();
-// }
+void stopMotor() {
+  for (int i=0; i < 5; i++) {
+    // std::cout << "Stop motor" << std::endl;
+    sample_controller->Stop(&sample_controller->commands);
+    can_comm_obj.read_and_write();
+  }
+}
+
+void Init_pi3hat(real64_T ctrl_period) {
+  Arguments args;
+  args.period_s = ctrl_period;
+  //TODO: set other parameters
+
+  // Initialize moteus interface. 
+  MoteusInterface::Options moteus_options;
+  moteus_options.cpu = args.can_cpu;
+  // This constructs the thread that sends and reads CAN messages
+  moteus_interface = std::make_unique<MoteusInterface>(moteus_options);
+
+  // Construct the controller
+  sample_controller = std::make_unique<SampleController>(args);
+  // Initialize (maybe, move to the contructor)
+  sample_controller->Initialize(&sample_controller->commands); 
+
+  // Connect the commands in the Controller with CAN communication
+  can_comm_obj.moteus_data.commands = { sample_controller->commands.data(), sample_controller->commands.size() };
+  can_comm_obj.moteus_data.replies = { can_comm_obj.replies.data(), can_comm_obj.replies.size() };
+
+  // Set initial position, reset error states. We do it several times so it is really set (we might have to do it just 2 times)
+  for (int i = 0; i < 5; i++) {
+    sample_controller->ResetInitPos(can_comm_obj.saved_replies, &sample_controller->commands);
+    can_comm_obj.read_and_write();
+  }
+}
+
+// --------------------------------------------------------------------------------
+// --------------------------------------------------------------------------------
+// --------------------------------------------------------------------------------
+
+
 
 
 void main_cycle() {
@@ -256,7 +264,8 @@ void main_cycle() {
   uint64_t margin_cycles = 0;
 
   // We will run at a fixed cycle time.
-  while (cycle_count < 50) {
+  uint64_t total_count = 100;
+  while (cycle_count < total_count) {
     cycle_count++;
     margin_cycles++;
 
@@ -294,119 +303,10 @@ void main_cycle() {
     total_margin += elapsed.count();
     next_cycle += period;
 
-    
-    if (cycle_count < 5) {
-      sample_controller->ResetInitPos(can_comm_obj.saved_replies, &sample_controller->commands);
-
-      can_comm_obj.read_and_write();
-      // if (can_comm_obj.can_result.valid()) { // At the beginning, can_result is not valid
-      //   // Now we get the result of our last query and send off our new one.
-      //   const auto current_values = can_comm_obj.can_result.get();
-
-      //   // We copy out the results we just got out.
-      //   const auto rx_count = current_values.query_result_size;
-      //   can_comm_obj.saved_replies.resize(rx_count);
-      //   std::copy(can_comm_obj.replies.begin(), can_comm_obj.replies.begin() + rx_count, can_comm_obj.saved_replies.begin());
-      // }
-      // // Then we can immediately ask them to be used again.
-      // auto promise = std::make_shared<std::promise<MoteusInterface::Output>>();
-      // moteus_interface->Cycle(
-      //     moteus_data,
-      //     [promise](const MoteusInterface::Output& output) {
-      //       // This is called from an arbitrary thread, so we just set the promise value here.
-      //       promise->set_value(output);
-      //     });
-      // can_comm_obj.can_result = promise->get_future();
-
-    } else if (cycle_count < 490) {
-
-      // sample_controller->Run(saved_replies, &commands);
-      sample_controller->SetPosition(&sample_controller->commands, 1);
-
-      double current_pos = 0;
-      sample_controller->ReadPosition(can_comm_obj.saved_replies, &current_pos);
-      std::cout << "Curr pos: " << current_pos << std::endl;
-      can_comm_obj.read_and_write();
-      // //////////////////
-      // if (can_comm_obj.can_result.valid()) { // Just to avoid some runtime error.
-      //   // Now we get the result of our last query and send off our new one.
-      //   const auto current_values = can_comm_obj.can_result.get();
-
-      //   // We copy out the results we just got out.
-      //   const auto rx_count = current_values.query_result_size;
-      //   can_comm_obj.saved_replies.resize(rx_count);
-      //   std::copy(can_comm_obj.replies.begin(), can_comm_obj.replies.begin() + rx_count, can_comm_obj.saved_replies.begin());
-      // }
-
-      // // Then we can immediately ask them to be used again.
-      // auto promise = std::make_shared<std::promise<MoteusInterface::Output>>();
-      // moteus_interface->Cycle(
-      //     moteus_data,
-      //     [promise](const MoteusInterface::Output& output) {
-      //       // This is called from an arbitrary thread, so we just set the promise value here.
-      //       promise->set_value(output);
-      //     });
-      // can_comm_obj.can_result = promise->get_future();
-
-    } else {
-      sample_controller->Stop(&sample_controller->commands);
-      can_comm_obj.read_and_write();
-
-      // // //////////////////
-      // if (can_comm_obj.can_result.valid()) { // Just to avoid some runtime error.
-      //   // Now we get the result of our last query and send off our new one.
-      //   const auto current_values = can_comm_obj.can_result.get(); // here, we have wait, so we wait until we get the value created by the second thread
-
-      //   // // We copy out the results we just got out.
-      //   const auto rx_count = current_values.query_result_size;
-      //   can_comm_obj.saved_replies.resize(rx_count);
-      //   std::copy(can_comm_obj.replies.begin(), can_comm_obj.replies.begin() + rx_count, can_comm_obj.saved_replies.begin());
-      // }
-
-      // // Then we can immediately ask them to be used again. The function "Cycle" also send our current commands
-      // auto promise = std::make_shared<std::promise<MoteusInterface::Output>>();
-      // moteus_interface->Cycle(moteus_data,[promise](const MoteusInterface::Output& output) {
-      //       // This is called from an arbitrary thread, so we just set the promise value here.
-      //       promise->set_value(output);});
-      // can_comm_obj.can_result = promise->get_future();
-
-      //////////////////
-    }
+    setPosition(2);
   }
-
-  
+  stopMotor();
 }
-
-
-
-void Init_pi3hat(double ctrl_period) {
-  Arguments args;
-  args.period_s = ctrl_period;
-  //TODO: set other parameters
-
-  // Initialize moteus interface. 
-  MoteusInterface::Options moteus_options;
-  moteus_options.cpu = args.can_cpu;
-  // This constructs the thread that sends and reads CAN messages
-  moteus_interface = std::make_unique<MoteusInterface>(moteus_options);
-
-  // Construct the controller
-  sample_controller = std::make_unique<SampleController>(args);
-  // Initialize (maybe, move to the contructor)
-  sample_controller->Initialize(&sample_controller->commands); 
-
-  // Connect the commands in the Controller with CAN communication
-  moteus_data.commands = { sample_controller->commands.data(), sample_controller->commands.size() };
-  moteus_data.replies = { can_comm_obj.replies.data(), can_comm_obj.replies.size() };
-
-}
-
-
-
-} // namespace end
-
-
-
 
 
 
@@ -415,8 +315,8 @@ int main(int argc, char** argv) {
 
   // Lock memory for the whole process.
   // LockMemory();
-  double ctrl_period = 0.01;
-  Init_pi3hat(ctrl_period);
+  real64_T period_s = 0.01;
+  Init_pi3hat(period_s);
 
 
 
