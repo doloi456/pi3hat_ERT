@@ -69,15 +69,7 @@ struct Arguments {
 //   return std::make_pair(rmin, rmax);
 // }
 
-class CAN_comm {
-  public:
-    CAN_comm() {
 
-    }
-
-  std::vector<MoteusInterface::ServoReply> replies{1}; // TODO: make the vector according to num of controlled motors
-  std::vector<MoteusInterface::ServoReply> saved_replies;
-};
 
 
 /// This holds the user-defined control logic.
@@ -188,8 +180,43 @@ class SampleController {
 
 std::unique_ptr<SampleController> sample_controller;
 std::unique_ptr<MoteusInterface> moteus_interface; 
-std::future<MoteusInterface::Output> can_result; // To hold CAN communication result
+MoteusInterface::Data moteus_data; // This hold commands that we set using Controller and that is read by CAN interface
+
+
+class CAN_comm {
+  public:
+    CAN_comm() {
+    }
+
+    void read_and_write() {
+      if (can_result.valid()) { // Just to avoid some runtime error.
+        // Now we get the result of our last query and send off our new one.
+        const auto current_values = can_result.get();
+
+        // We copy out the results we just got out.
+        const auto rx_count = current_values.query_result_size;
+        saved_replies.resize(rx_count);
+        std::copy(replies.begin(), replies.begin() + rx_count, saved_replies.begin());
+      }
+
+      // Then we can immediately ask them to be used again.
+      auto promise = std::make_shared<std::promise<MoteusInterface::Output>>();
+      moteus_interface->Cycle(
+          moteus_data,
+          [promise](const MoteusInterface::Output& output) {
+            // This is called from an arbitrary thread, so we just set the promise value here.
+            promise->set_value(output);
+          });
+      can_result = promise->get_future();
+    }
+
+  std::future<MoteusInterface::Output> can_result; // To hold CAN communication result
+  std::vector<MoteusInterface::ServoReply> replies{1}; // TODO: make the vector according to num of controlled motors
+  std::vector<MoteusInterface::ServoReply> saved_replies;
+};
+
 CAN_comm can_comm_obj;
+
 
 
 // -------------------- Runing the main cycle of the program --------------------
@@ -218,15 +245,7 @@ CAN_comm can_comm_obj;
 
 void main_cycle() {
   // moteus::ConfigureRealtime(args.main_cpu); // Maybe not necessary when used with ERT linux
-  sample_controller->Initialize(&sample_controller->commands);
-  std::cout << "Size: " << sample_controller->commands.size() << std::endl;
-  // std::vector<MoteusInterface::ServoReply> replies{sample_controller->num_motors};
   
-
-  MoteusInterface::Data moteus_data; // This hold commands that we set using Controller and that is read by CAN communication interface
-  moteus_data.commands = { sample_controller->commands.data(), sample_controller->commands.size() };
-  moteus_data.replies = { can_comm_obj.replies.data(), can_comm_obj.replies.size() };
-
   const auto period = std::chrono::microseconds(static_cast<int64_t>(sample_controller->arguments_.period_s * 1e6));
   auto next_cycle = std::chrono::steady_clock::now() + period;
 
@@ -279,69 +298,77 @@ void main_cycle() {
     if (cycle_count < 5) {
       sample_controller->ResetInitPos(can_comm_obj.saved_replies, &sample_controller->commands);
 
-      if (can_result.valid()) { // At the beginning, can_result is not valid
-        // Now we get the result of our last query and send off our new one.
-        const auto current_values = can_result.get();
+      can_comm_obj.read_and_write();
+      // if (can_comm_obj.can_result.valid()) { // At the beginning, can_result is not valid
+      //   // Now we get the result of our last query and send off our new one.
+      //   const auto current_values = can_comm_obj.can_result.get();
 
-        // We copy out the results we just got out.
-        const auto rx_count = current_values.query_result_size;
-        can_comm_obj.saved_replies.resize(rx_count);
-        std::copy(can_comm_obj.replies.begin(), can_comm_obj.replies.begin() + rx_count, can_comm_obj.saved_replies.begin());
-      }
-      // Then we can immediately ask them to be used again.
-      auto promise = std::make_shared<std::promise<MoteusInterface::Output>>();
-      moteus_interface->Cycle(
-          moteus_data,
-          [promise](const MoteusInterface::Output& output) {
-            // This is called from an arbitrary thread, so we just set the promise value here.
-            promise->set_value(output);
-          });
-      can_result = promise->get_future();
+      //   // We copy out the results we just got out.
+      //   const auto rx_count = current_values.query_result_size;
+      //   can_comm_obj.saved_replies.resize(rx_count);
+      //   std::copy(can_comm_obj.replies.begin(), can_comm_obj.replies.begin() + rx_count, can_comm_obj.saved_replies.begin());
+      // }
+      // // Then we can immediately ask them to be used again.
+      // auto promise = std::make_shared<std::promise<MoteusInterface::Output>>();
+      // moteus_interface->Cycle(
+      //     moteus_data,
+      //     [promise](const MoteusInterface::Output& output) {
+      //       // This is called from an arbitrary thread, so we just set the promise value here.
+      //       promise->set_value(output);
+      //     });
+      // can_comm_obj.can_result = promise->get_future();
 
     } else if (cycle_count < 490) {
 
       // sample_controller->Run(saved_replies, &commands);
-      sample_controller->SetPosition(&sample_controller->commands, 3);
-      //////////////////
-      if (can_result.valid()) { // Just to avoid some runtime error.
-        // Now we get the result of our last query and send off our new one.
-        const auto current_values = can_result.get();
+      sample_controller->SetPosition(&sample_controller->commands, 1);
 
-        // We copy out the results we just got out.
-        const auto rx_count = current_values.query_result_size;
-        can_comm_obj.saved_replies.resize(rx_count);
-        std::copy(can_comm_obj.replies.begin(), can_comm_obj.replies.begin() + rx_count, can_comm_obj.saved_replies.begin());
-      }
+      double current_pos = 0;
+      sample_controller->ReadPosition(can_comm_obj.saved_replies, &current_pos);
+      std::cout << "Curr pos: " << current_pos << std::endl;
+      can_comm_obj.read_and_write();
+      // //////////////////
+      // if (can_comm_obj.can_result.valid()) { // Just to avoid some runtime error.
+      //   // Now we get the result of our last query and send off our new one.
+      //   const auto current_values = can_comm_obj.can_result.get();
 
-      // Then we can immediately ask them to be used again.
-      auto promise = std::make_shared<std::promise<MoteusInterface::Output>>();
-      moteus_interface->Cycle(
-          moteus_data,
-          [promise](const MoteusInterface::Output& output) {
-            // This is called from an arbitrary thread, so we just set the promise value here.
-            promise->set_value(output);
-          });
-      can_result = promise->get_future();
+      //   // We copy out the results we just got out.
+      //   const auto rx_count = current_values.query_result_size;
+      //   can_comm_obj.saved_replies.resize(rx_count);
+      //   std::copy(can_comm_obj.replies.begin(), can_comm_obj.replies.begin() + rx_count, can_comm_obj.saved_replies.begin());
+      // }
+
+      // // Then we can immediately ask them to be used again.
+      // auto promise = std::make_shared<std::promise<MoteusInterface::Output>>();
+      // moteus_interface->Cycle(
+      //     moteus_data,
+      //     [promise](const MoteusInterface::Output& output) {
+      //       // This is called from an arbitrary thread, so we just set the promise value here.
+      //       promise->set_value(output);
+      //     });
+      // can_comm_obj.can_result = promise->get_future();
 
     } else {
       sample_controller->Stop(&sample_controller->commands);
+      can_comm_obj.read_and_write();
+
       // // //////////////////
-      if (can_result.valid()) { // Just to avoid some runtime error.
-        // Now we get the result of our last query and send off our new one.
-        const auto current_values = can_result.get(); // here, we have wait, so we wait until we get the value created by the second thread
+      // if (can_comm_obj.can_result.valid()) { // Just to avoid some runtime error.
+      //   // Now we get the result of our last query and send off our new one.
+      //   const auto current_values = can_comm_obj.can_result.get(); // here, we have wait, so we wait until we get the value created by the second thread
 
-        // // We copy out the results we just got out.
-        const auto rx_count = current_values.query_result_size;
-        can_comm_obj.saved_replies.resize(rx_count);
-        std::copy(can_comm_obj.replies.begin(), can_comm_obj.replies.begin() + rx_count, can_comm_obj.saved_replies.begin());
-      }
+      //   // // We copy out the results we just got out.
+      //   const auto rx_count = current_values.query_result_size;
+      //   can_comm_obj.saved_replies.resize(rx_count);
+      //   std::copy(can_comm_obj.replies.begin(), can_comm_obj.replies.begin() + rx_count, can_comm_obj.saved_replies.begin());
+      // }
 
-      // Then we can immediately ask them to be used again. The function "Cycle" also send our current commands
-      auto promise = std::make_shared<std::promise<MoteusInterface::Output>>();
-      moteus_interface->Cycle(moteus_data,[promise](const MoteusInterface::Output& output) {
-            // This is called from an arbitrary thread, so we just set the promise value here.
-            promise->set_value(output);});
-      can_result = promise->get_future();
+      // // Then we can immediately ask them to be used again. The function "Cycle" also send our current commands
+      // auto promise = std::make_shared<std::promise<MoteusInterface::Output>>();
+      // moteus_interface->Cycle(moteus_data,[promise](const MoteusInterface::Output& output) {
+      //       // This is called from an arbitrary thread, so we just set the promise value here.
+      //       promise->set_value(output);});
+      // can_comm_obj.can_result = promise->get_future();
 
       //////////////////
     }
@@ -365,6 +392,13 @@ void Init_pi3hat(double ctrl_period) {
 
   // Construct the controller
   sample_controller = std::make_unique<SampleController>(args);
+  // Initialize (maybe, move to the contructor)
+  sample_controller->Initialize(&sample_controller->commands); 
+
+  // Connect the commands in the Controller with CAN communication
+  moteus_data.commands = { sample_controller->commands.data(), sample_controller->commands.size() };
+  moteus_data.replies = { can_comm_obj.replies.data(), can_comm_obj.replies.size() };
+
 }
 
 
