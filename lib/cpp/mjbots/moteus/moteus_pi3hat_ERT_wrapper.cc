@@ -150,30 +150,30 @@ class SampleController {
   //   }
   // }
 
-  void SetPosition(const std::vector<MoteusInterface::ServoReply>& status, std::vector<MoteusInterface::ServoCommand>* output, double position, double velocity) {
-    const auto motor = Get(status, arguments_.motor_id, arguments_.motor_bus);
-    double motor_pos = motor.position;
+  void SetPosition(std::vector<MoteusInterface::ServoCommand>* output, 
+                  double position, double velocity, double max_torque) {
 
     if (!std::isnan(motor_initial_pos_)) {     
       (*output)[0].mode = moteus::Mode::kPosition;
-      (*output)[0].position.position = motor_initial_pos_ + position;
+      (*output)[0].position.position = std::numeric_limits<double>::quiet_NaN();
+      (*output)[0].position.stop_position = motor_initial_pos_ + position;
       (*output)[0].position.velocity = velocity;
-      (*output)[0].position.maximum_torque = 0.05;
-      
+      (*output)[0].position.maximum_torque = max_torque;
     }
   }
 
-  void Stop(const std::vector<MoteusInterface::ServoReply>& status, std::vector<MoteusInterface::ServoCommand>* output) {
-    cycle_count_++;
+  void ReadPosition(const std::vector<MoteusInterface::ServoReply>& status, double* out_position) {
+    const auto motor = Get(status, arguments_.motor_id, arguments_.motor_bus);
+    *out_position = motor.position;
+  }
+
+  void Stop(std::vector<MoteusInterface::ServoCommand>* output) {
     (*output)[0].mode = moteus::Mode::kStopped;   
   }
 
   void ResetInitPos(const std::vector<MoteusInterface::ServoReply>& status, std::vector<MoteusInterface::ServoCommand>* output) {
-    cycle_count_++;
-    for (auto& cmd : *output) {
-        // We start everything with a stopped command to clear faults.
-      cmd.mode = moteus::Mode::kStopped;
-    }
+    (*output)[0].mode = moteus::Mode::kPosition;
+
     const auto motor = Get(status, arguments_.motor_id, arguments_.motor_bus);
     double motor_pos = motor.position;
     if (!std::isnan(motor_pos)) {
@@ -181,9 +181,12 @@ class SampleController {
     } 
   }
 
+  // ----------------------------------------------
+  // ------------------ Members: ------------------
+  // ----------------------------------------------
+
   const Arguments arguments_;
  private:
-  uint64_t cycle_count_ = 0;
   double motor_initial_pos_ = std::numeric_limits<double>::quiet_NaN();
 };
 
@@ -195,15 +198,13 @@ class SampleController {
 std::unique_ptr<SampleController> sample_controller;
 std::unique_ptr<MoteusInterface> moteus_interface; 
 
+
+
+
 // -------------------- Runing the main cycle of the program --------------------
 
-// template <typename Controller>
-// void main_cycle(const Arguments& args, Controller* controller) {
-
-// void main_cycle(const Arguments& args) {
 void main_cycle() {
   // moteus::ConfigureRealtime(args.main_cpu); // Maybe not necessary when used with ERT linux
-
 
   std::vector<MoteusInterface::ServoCommand> commands; // Each entry in the vector is for each controlled motor.
   for (const auto& id_bus_mappings : sample_controller->servo_bus_map()) {
@@ -217,7 +218,7 @@ void main_cycle() {
 
   sample_controller->Initialize(&commands);
 
-  MoteusInterface::Data moteus_data;
+  MoteusInterface::Data moteus_data; // This hold commands that we set using Controller and that is read by CAN communication interface
   moteus_data.commands = { commands.data(), commands.size() };
   moteus_data.replies = { replies.data(), replies.size() };
 
@@ -239,8 +240,6 @@ void main_cycle() {
     {
       const auto now = std::chrono::steady_clock::now();
       if (now > next_status) {
-        // NOTE: iomanip is not a recommended pattern.  We use it here
-        // simply to not require any external dependencies, like 'fmt'.
         const auto volts = MinMaxVoltage(saved_replies);
         const std::string modes = [&]() {
           std::ostringstream result;
@@ -313,7 +312,7 @@ void main_cycle() {
     } else if (cycle_count < 990) {
 
       // sample_controller->Run(saved_replies, &commands);
-      sample_controller->SetPosition(saved_replies, &commands, 0, 0.1);
+      sample_controller->SetPosition(&commands, 1, 0.2, 0.02);
       //////////////////
       if (can_result.valid()) { // Just to avoid some runtime error.
         // Now we get the result of our last query and send off our new one.
@@ -336,18 +335,16 @@ void main_cycle() {
       can_result = promise->get_future();
 
     } else {
-      sample_controller->Stop(saved_replies, &commands);
+      sample_controller->Stop(&commands);
       // // //////////////////
       if (can_result.valid()) { // Just to avoid some runtime error.
         // Now we get the result of our last query and send off our new one.
         const auto current_values = can_result.get(); // here, we have wait, so we wait until we get the value created by the second thread
-        // std::cout << "Can result is valid" << std::endl;
+
         // // We copy out the results we just got out.
         const auto rx_count = current_values.query_result_size;
         saved_replies.resize(rx_count);
         std::copy(replies.begin(), replies.begin() + rx_count, saved_replies.begin());
-      } else {
-        // std::cout << "Can result is not valid" << std::endl;
       }
 
       // Then we can immediately ask them to be used again. The function "Cycle" also send our current commands
@@ -363,7 +360,6 @@ void main_cycle() {
 
   
 }
-
 
 
 
