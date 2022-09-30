@@ -101,6 +101,14 @@ class SampleController {
     for (auto& cmd : *commands) {
       cmd.resolution = res;
     }
+
+    for (const auto& id_bus_mappings : servo_bus_map()) {
+      commands->push_back({});
+      commands->back().id = id_bus_mappings.first;
+      commands->back().bus = id_bus_mappings.second;
+    }
+
+
   }
 
   moteus::QueryResult Get(const std::vector<MoteusInterface::ServoReply>& replies, int id, int bus) {
@@ -112,7 +120,7 @@ class SampleController {
     return {};
   }
 
-  /// This is run at each control cycle.  @p status is the most recent
+  /// These functions serve to control the motor.  @p status is the most recent
   /// status of all servos (note that it is possible for a given
   /// servo's result to be omitted on some frames).
   ///
@@ -120,45 +128,13 @@ class SampleController {
   /// pre-populated with the result of the last command cycle, (or
   /// Initialize to begin with).
 
-  // void Run(const std::vector<MoteusInterface::ServoReply>& status, std::vector<MoteusInterface::ServoCommand>* output) {
-  //   cycle_count_++;
-
-  //   // This is where your control loop would go.
-
-  //   if (cycle_count_ < 5) {
-  //     for (auto& cmd : *output) {
-  //       // We start everything with a stopped command to clear faults.
-  //       cmd.mode = moteus::Mode::kStopped;
-  //     }
-  //   } else {
-  //     // Then we control primary servo
-  //     const auto motor = Get(status, arguments_.motor_id, arguments_.motor_bus);
-      
-  //     double motor_pos = motor.position;
-
-  //     // Set primary position of the motor
-  //     if (!std::isnan(motor_pos) && std::isnan(motor_initial_pos_)) {
-  //       motor_initial_pos_ = motor_pos;
-  //     } 
-
-  //     if (!std::isnan(motor_initial_pos_)) {
-  //       // (*output)[0].mode = moteus::Mode::kStopped;        
-  //       (*output)[0].mode = moteus::Mode::kPosition;
-  //       (*output)[0].position.position = motor_initial_pos_ + double(cycle_count_) / 10000;
-  //       (*output)[0].position.velocity = 0.2;
-  //     }
-  //   }
-  // }
-
-  void SetPosition(std::vector<MoteusInterface::ServoCommand>* output, 
-                  double position, double velocity, double max_torque) {
+  void SetPosition(std::vector<MoteusInterface::ServoCommand>* output, double position) {
+    // const auto motor = Get(status, arguments_.motor_id, arguments_.motor_bus);
+    // double motor_pos = motor.position;
 
     if (!std::isnan(motor_initial_pos_)) {     
       (*output)[0].mode = moteus::Mode::kPosition;
-      (*output)[0].position.position = std::numeric_limits<double>::quiet_NaN();
-      (*output)[0].position.stop_position = motor_initial_pos_ + position;
-      (*output)[0].position.velocity = velocity;
-      (*output)[0].position.maximum_torque = max_torque;
+      (*output)[0].position.position = motor_initial_pos_ + position;  // Any starting position
     }
   }
 
@@ -186,8 +162,11 @@ class SampleController {
   // ----------------------------------------------
 
   const Arguments arguments_;
- private:
   double motor_initial_pos_ = std::numeric_limits<double>::quiet_NaN();
+  std::vector<MoteusInterface::ServoCommand> commands; // Each entry in the vector is for each controlled motor.
+
+ private:
+  
 };
 
 
@@ -199,27 +178,22 @@ std::unique_ptr<SampleController> sample_controller;
 std::unique_ptr<MoteusInterface> moteus_interface; 
 
 
-
-
 // -------------------- Runing the main cycle of the program --------------------
 
 void main_cycle() {
   // moteus::ConfigureRealtime(args.main_cpu); // Maybe not necessary when used with ERT linux
 
-  std::vector<MoteusInterface::ServoCommand> commands; // Each entry in the vector is for each controlled motor.
-  for (const auto& id_bus_mappings : sample_controller->servo_bus_map()) {
-    commands.push_back({});
-    commands.back().id = id_bus_mappings.first;
-    commands.back().bus = id_bus_mappings.second;
-  }
 
-  std::vector<MoteusInterface::ServoReply> replies{commands.size()};
+
+  sample_controller->Initialize(&sample_controller->commands);
+
+  std::vector<MoteusInterface::ServoReply> replies{sample_controller->commands.size()};
   std::vector<MoteusInterface::ServoReply> saved_replies;
 
-  sample_controller->Initialize(&commands);
+  
 
   MoteusInterface::Data moteus_data; // This hold commands that we set using Controller and that is read by CAN communication interface
-  moteus_data.commands = { commands.data(), commands.size() };
+  moteus_data.commands = { sample_controller->commands.data(), sample_controller->commands.size() };
   moteus_data.replies = { replies.data(), replies.size() };
 
   std::future<MoteusInterface::Output> can_result;
@@ -237,57 +211,56 @@ void main_cycle() {
   while (cycle_count < 1000) {
     cycle_count++;
     margin_cycles++;
-    {
-      const auto now = std::chrono::steady_clock::now();
-      if (now > next_status) {
-        const auto volts = MinMaxVoltage(saved_replies);
-        const std::string modes = [&]() {
-          std::ostringstream result;
-          result.precision(4);
-          result << std::fixed;
-          for (const auto& item : saved_replies) {
-            result << item.id << "/"
-                   << item.bus << "/"
-                   << static_cast<int>(item.result.mode) << "/"
-                   << item.result.position << " ";
-          }
-          return result.str();
-        }();
-        std::cout << std::setprecision(6) << std::fixed
-                  << "Cycles " << cycle_count
-                  << "  margin: " << (total_margin / margin_cycles)
-                  << std::setprecision(1)
-                  << "  volts: " << volts.first << "/" << volts.second
-                  << "  modes: " << modes
-                  << "   \r";
-        std::cout.flush();
-        next_status += status_period;
-        total_margin = 0;
-        margin_cycles = 0;
-      }
 
-      int skip_count = 0;
-      while (now > next_cycle) {
-        skip_count++;
-        next_cycle += period;
-      }
-      if (skip_count) {
-        std::cout << "\nSkipped " << skip_count << " cycles\n";
-      }
+    // std::cout << "Init pos is: " << sample_controller->motor_initial_pos_ << std::endl;
+    const auto now = std::chrono::steady_clock::now();
+    if (now > next_status) {
+      // const auto volts = MinMaxVoltage(saved_replies);
+      const std::string modes = [&]() {
+        std::ostringstream result;
+        result.precision(4);
+        result << std::fixed;
+        for (const auto& item : saved_replies) {
+          result << item.id << "/"
+                  << item.bus << "/"
+                  << static_cast<int>(item.result.mode) << "/"
+                  << item.result.position << " ";
+        }
+        return result.str();
+      }();
+      // std::cout << std::setprecision(6) << std::fixed
+      //           << "Cycles " << cycle_count
+      //           << "  margin: " << (total_margin / margin_cycles)
+      //           << std::setprecision(1)
+      //           << "  volts: " << volts.first << "/" << volts.second
+      //           << "  modes: " << modes
+      //           << "   \r";
+      // std::cout.flush();
+      next_status += status_period;
+      total_margin = 0;
+      margin_cycles = 0;
     }
+
+    int skip_count = 0;
+    while (now > next_cycle) {
+      skip_count++;
+      next_cycle += period;
+    }
+      // if (skip_count) {
+      //   std::cout << "\nSkipped " << skip_count << " cycles\n";
+      // }
+
     // Wait for the next control cycle to come up.
-    {
-      const auto pre_sleep = std::chrono::steady_clock::now();
-      std::this_thread::sleep_until(next_cycle);
-      const auto post_sleep = std::chrono::steady_clock::now();
-      std::chrono::duration<double> elapsed = post_sleep - pre_sleep;
-      total_margin += elapsed.count();
-    }
+    const auto pre_sleep = std::chrono::steady_clock::now();
+    std::this_thread::sleep_until(next_cycle);
+    const auto post_sleep = std::chrono::steady_clock::now();
+    std::chrono::duration<double> elapsed = post_sleep - pre_sleep;
+    total_margin += elapsed.count();
     next_cycle += period;
 
-    // ------------------------------------- HERE, we are calling the controller -------------------------------------
+
     if (cycle_count < 5) {
-      sample_controller->ResetInitPos(saved_replies, &commands);
+      sample_controller->ResetInitPos(saved_replies, &sample_controller->commands);
 
       if (can_result.valid()) { // Just to avoid some runtime error.
         // Now we get the result of our last query and send off our new one.
@@ -312,7 +285,7 @@ void main_cycle() {
     } else if (cycle_count < 990) {
 
       // sample_controller->Run(saved_replies, &commands);
-      sample_controller->SetPosition(&commands, 1, 0.2, 0.02);
+      sample_controller->SetPosition(&sample_controller->commands, 3);
       //////////////////
       if (can_result.valid()) { // Just to avoid some runtime error.
         // Now we get the result of our last query and send off our new one.
@@ -335,7 +308,7 @@ void main_cycle() {
       can_result = promise->get_future();
 
     } else {
-      sample_controller->Stop(&commands);
+      sample_controller->Stop(&sample_controller->commands);
       // // //////////////////
       if (can_result.valid()) { // Just to avoid some runtime error.
         // Now we get the result of our last query and send off our new one.
@@ -371,10 +344,10 @@ void Init_pi3hat(double ctrl_period) {
   // Initialize moteus interface. 
   MoteusInterface::Options moteus_options;
   moteus_options.cpu = args.can_cpu;
-  // This creates thread that sends and reads CAN messages
+  // This constructs the thread that sends and reads CAN messages
   moteus_interface = std::make_unique<MoteusInterface>(moteus_options);
 
-  // Initialize the controller
+  // Construct the controller
   sample_controller = std::make_unique<SampleController>(args);
 }
 
